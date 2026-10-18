@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.jeecg.modules.psms.aipredict.mapper.AiBizMapper">
+
+    <!-- 分页读取原始油烟数据(时间升序) -->
+    <select id="pageLampblackRaw" resultType="java.util.Map">
+        SELECT
+            id,
+            point_mac as pointMac,
+            create_time as createTime,
+            lampblack_data as lampblackData,
+            lampblack_avgdata as lampblackAvgdata,
+            matter_data as matterData,
+            nmhc_data as nmhcData,
+            fan_status as fanStatus,
+            purifier_status as purifierStatus,
+            temp, hum
+        FROM ${srcTable}
+        WHERE 1=1
+        <if test="startTime != null and startTime != ''">
+            AND create_time &gt;= #{startTime}
+        </if>
+        <if test="endTime != null and endTime != ''">
+            AND create_time &lt; #{endTime}
+        </if>
+        ORDER BY create_time ASC, id ASC
+    </select>
+
+    <!-- 净化器功率聚合: 每油烟记录(可能有多个电源模块) -->
+    <select id="listPurifierPowerByLampblackIds" resultType="java.util.Map">
+        SELECT
+            bu_lampblack_id as buLampblackId,
+            IFNULL(MAX(output_power),0) as maxPower,
+            IFNULL(SUM(CASE WHEN output_power IS NOT NULL AND output_power &gt; 0 THEN 1 ELSE 0 END),0) as onCnt,
+            IFNULL(MAX(power_open_status),0) as maxOpen
+        FROM ${srcTable}
+        WHERE bu_lampblack_id IN
+        <foreach collection="ids" item="item" open="(" close=")" separator=",">
+            #{item}
+        </foreach>
+        GROUP BY bu_lampblack_id
+    </select>
+
+    <!-- 测点→企业映射 -->
+    <select id="listPointCompanyByMacs" resultType="java.util.Map">
+        SELECT
+            BP.point_mac as pointMac,
+            BP.company_id as companyId,
+            BP.name as pointName,
+            BC.name as companyName
+        FROM base_point BP
+        LEFT JOIN base_company BC ON BC.id = BP.company_id
+        WHERE BP.point_mac IN
+        <foreach collection="macs" item="item" open="(" close=")" separator=",">
+            #{item}
+        </foreach>
+    </select>
+
+    <!-- 批量插入中间表(已存在跳过) -->
+    <insert id="batchInsertInput">
+        INSERT IGNORE INTO ai_predict_input
+        (id, point_mac, company_id, data_time, minute_no, sample_cnt, lampblack_avg, lampblack_max,
+         matter_avg, nmhc_avg, fan_on_cnt, purifier_on_cnt, purifier_power_zero_cnt, off_over_cnt,
+         over_cnt, over_flag,
+         source_table, create_time)
+        VALUES
+        <foreach collection="list" item="it" separator=",">
+            (#{it.id}, #{it.pointMac}, #{it.companyId}, #{it.dataTime}, #{it.minuteNo}, #{it.sampleCnt},
+             #{it.lampblackAvg}, #{it.lampblackMax}, #{it.matterAvg}, #{it.nmhcAvg}, #{it.fanOnCnt},
+             #{it.purifierOnCnt}, #{it.purifierPowerZeroCnt}, #{it.offOverCnt}, #{it.overCnt},
+             #{it.overFlag},
+             #{it.sourceTable}, #{it.createTime})
+        </foreach>
+    </insert>
+
+    <!-- 清理某测点某日中间数据 -->
+    <delete id="deleteInputByPointDate">
+        DELETE FROM ai_predict_input
+        WHERE point_mac = #{pointMac}
+          AND DATE_FORMAT(data_time,'%Y-%m-%d') = #{dataDate}
+    </delete>
+
+    <!-- 清空某来源全量 -->
+    <delete id="clearInputBySource">
+        DELETE FROM ai_predict_input WHERE source_table = #{srcTable}
+    </delete>
+
+    <!-- 清空全部中间数据(演示清理用) -->
+    <delete id="clearAllInput">
+        DELETE FROM ai_predict_input
+    </delete>
+
+    <!-- 清理某时间范围中间数据(按时间条件,由调用方保证sourceTable约束) -->
+    <delete id="clearInputByRange">
+        DELETE FROM ai_predict_input
+        WHERE 1=1
+        <if test="startTime != null and startTime != ''">
+            AND data_time &gt;= #{startTime}
+        </if>
+        <if test="endTime != null and endTime != ''">
+            AND data_time &lt; #{endTime}
+        </if>
+        <if test="srcTable != null and srcTable != ''">
+            AND source_table = #{srcTable}
+        </if>
+    </delete>
+
+    <!-- 每测点每日统计 -->
+    <select id="statDailyByPoint" resultType="java.util.Map">
+        SELECT
+            point_mac as pointMac,
+            company_id as companyId,
+            DATE_FORMAT(data_time,'%Y-%m-%d') as statDate,
+            COUNT(1) as slotCnt,
+            SUM(CASE WHEN over_flag = 1 THEN 1 ELSE 0 END) as overSlotCnt,
+            SUM(sample_cnt) as sampleCnt,
+            SUM(over_cnt) as overCnt,
+            IFNULL(ROUND(AVG(over_flag),6),0) as avgRate
+        FROM ai_predict_input
+        WHERE 1=1
+        <if test="startDay != null and startDay != ''">
+            AND DATE_FORMAT(data_time,'%Y-%m-%d') &gt;= #{startDay}
+        </if>
+        <if test="endDay != null and endDay != ''">
+            AND DATE_FORMAT(data_time,'%Y-%m-%d') &lt;= #{endDay}
+        </if>
+        <if test="srcTable != null and srcTable != ''">
+            AND source_table = #{srcTable}
+        </if>
+        GROUP BY point_mac, company_id, DATE_FORMAT(data_time,'%Y-%m-%d')
+    </select>
+
+    <!-- 每企业每日统计 -->
+    <select id="statDailyByCompany" resultType="java.util.Map">
+        SELECT
+            company_id as companyId,
+            DATE_FORMAT(data_time,'%Y-%m-%d') as statDate,
+            COUNT(1) as slotCnt,
+            SUM(CASE WHEN over_flag = 1 THEN 1 ELSE 0 END) as overSlotCnt,
+            SUM(sample_cnt) as sampleCnt,
+            SUM(over_cnt) as overCnt
+        FROM ai_predict_input
+        WHERE company_id IS NOT NULL AND company_id != ''
+        <if test="startDay != null and startDay != ''">
+            AND DATE_FORMAT(data_time,'%Y-%m-%d') &gt;= #{startDay}
+        </if>
+        <if test="endDay != null and endDay != ''">
+            AND DATE_FORMAT(data_time,'%Y-%m-%d') &lt;= #{endDay}
+        </if>
+        <if test="srcTable != null and srcTable != ''">
+            AND source_table = #{srcTable}
+        </if>
+        GROUP BY company_id, DATE_FORMAT(data_time,'%Y-%m-%d')
+    </select>
+
+    <!-- 某测点某日逐时槽 -->
+    <select id="listSlotByPointDate" resultType="java.util.Map">
+        SELECT
+            point_mac as pointMac,
+            company_id as companyId,
+            data_time as dataTime,
+            lampblack_avg as lampblackAvg,
+            lampblack_max as lampblackMax,
+            over_flag as overFlag,
+            purifier_power_zero_cnt as purifierPowerZeroCnt,
+            fan_on_cnt as fanOnCnt,
+            purifier_on_cnt as purifierOnCnt,
+            sample_cnt as sampleCnt
+        FROM ai_predict_input
+        WHERE point_mac = #{pointMac}
+          AND DATE_FORMAT(data_time,'%Y-%m-%d') = #{dataDate}
+        ORDER BY data_time ASC
+    </select>
+
+    <!-- 各测点每日超标标记(用于评估) -->
+    <select id="listDailyOverFlag" resultType="java.util.Map">
+        SELECT
+            point_mac as pointMac,
+            company_id as companyId,
+            DATE_FORMAT(data_time,'%Y-%m-%d') as statDate,
+            MAX(over_flag) as overFlag
+        FROM ai_predict_input
+        WHERE 1=1
+        <if test="startDay != null and startDay != ''">
+            AND DATE_FORMAT(data_time,'%Y-%m-%d') &gt;= #{startDay}
+        </if>
+        <if test="endDay != null and endDay != ''">
+            AND DATE_FORMAT(data_time,'%Y-%m-%d') &lt;= #{endDay}
+        </if>
+        <if test="srcTable != null and srcTable != ''">
+            AND source_table = #{srcTable}
+        </if>
+        GROUP BY point_mac, company_id, DATE_FORMAT(data_time,'%Y-%m-%d')
+    </select>
+
+    <!-- 测点下拉 -->
+    <select id="listPointOptions" resultType="java.util.Map">
+        SELECT BP.point_mac as pointMac, BP.name as pointName, BP.company_id as companyId, BC.name as companyName
+        FROM base_point BP
+        LEFT JOIN base_company BC ON BC.id = BP.company_id
+        ORDER BY BP.company_id
+    </select>
+
+    <!-- 企业下拉 -->
+    <select id="listCompanyOptions" resultType="java.util.Map">
+        SELECT id as companyId, name as companyName, code
+        FROM base_company ORDER BY create_time
+    </select>
+
+    <!-- 企业名称批量查询 -->
+    <select id="listCompanyName" resultType="java.util.Map">
+        SELECT id as companyId, name as companyName
+        FROM base_company
+        WHERE id IN
+        <foreach collection="ids" item="item" open="(" close=")" separator=",">
+            #{item}
+        </foreach>
+    </select>
+
+    <!-- 最新预测生成日 -->
+    <select id="selectLastForecastDate" resultType="java.util.Map">
+        SELECT MAX(forecast_date) AS maxDay FROM ai_forecast_result
+    </select>
+
+    <!-- 最新中间数据时间 -->
+    <select id="selectLastInputTime" resultType="java.util.Map">
+        SELECT MAX(data_time) AS maxTime FROM ai_predict_input
+    </select>
+</mapper>

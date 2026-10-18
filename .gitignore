@@ -1,0 +1,21 @@
+# 构建产物与依赖
+node_modules/
+**/node_modules/
+target/
+**/target/
+dist/
+*.jar
+
+# IDE / 系统
+.idea/
+*.iml
+.DS_Store
+
+# 日志与崩溃文件
+*.log
+logs/
+hs_err_pid*.log
+replay_pid*.log
+
+# 临时/压缩包
+*.zip
